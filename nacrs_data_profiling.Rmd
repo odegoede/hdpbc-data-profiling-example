@@ -1,0 +1,299 @@
+---
+title: "NACRS Data Profiling"
+author: "Olivia de Goede,"
+date: "`r format(Sys.time(), '%B %d %Y')`"
+output: 
+  github_document:
+    toc: true
+---
+
+## In this script
+
+The purpose of this script is to provide an example of data profiling of the data holdings housed on HDPBC.
+
+This code incorporates a yaml configuration file, as well as several R files that contain customized functions and data rules. If a different user were to adopt this code, they would need to edit the yaml file to suit their needs (most importantly, changing the username to their own).
+
+*Note:* Many of these functions take a long time when working on large tables. To test this code on your own data, start with a subset of 100,000 to 1,000,000 rows.
+
+**Packages used:** `DBI`, `odbc`, `rstudioapi`, `dbplyr`, `tidyverse`, `glue`, `yaml`, `magrittr`, `lubridate`, `dlookr`, `validate`.
+
+**Data used:** [NACRS_PreA : NACRS_CORE](http://catalogue-hdp.healthbc.org/#/catalogue/dataClass/c523f8cc-6dc5-40e2-bb4d-f8099fa14917//a028fbd6-76f4-4b9d-811e-63d9cadf8ba3/description)
+
+
+
+## Set up R session
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load-lib, message=FALSE, warning=FALSE}
+# load packages:
+library(yaml)
+library(DBI)
+library(odbc)
+library(dbplyr)
+library(tidyverse)
+library(glue)
+library(magrittr)
+library(lubridate)
+library(dlookr)
+library(validate)
+
+# load in my R functions and data rules:
+source("R/functions_data_loading.R")
+source("R/functions_summary_tables.R")
+source("R/functions_visualization.R")
+source("R/validate_rules.R")
+
+# load in yaml config file:
+config <- read_yaml("config.yml")
+
+# connect to database:
+con <- make_connection(username = config$con$username,
+                       db = config$con$db)
+```
+
+
+
+## Load in the data
+
+The following function from `functions_data_loading.R` reads in the table of interest. 
+
+```{r data-load}
+nacrs_core <- load_full_table(data_holding = "NACRS_PreA", table = "NACRS_CORE")
+```
+
+For very large tables, you may want to load in just a random subset. The line below takes a subset of the data based on some ID variable, which you can specify by its column name (e.g. PHN_e, PRAC_KEY_e). The `denom_exp` is the base-10 exponent of the fraction of the table you want (e.g. in this example line below I want one-tenth of the table, that is 1/10^1, so the `denom_exp` value is 1; if I wanted one-hundredth `denom_exp` would be 2, one-thousandth would have a `denom_exp` value of 3, etc.).
+
+*Note:* the line below is not actually being run here, it's just shown for an example of how to use it.
+``` {r data-subset-load, eval = FALSE}
+mini_nacrs_core <- load_random_subset(data_holding = "NACRS_PreA", table = "NACRS_CORE", id_var = "PHN_e", denom_exp = 1)
+```
+
+
+
+## Adjust data types
+
+### Dates
+
+*Note:* this date conversion goes to UTC; not time-zone / daylight savings time-aware.
+``` {r date-convert}
+date_cols <- c("REGDATE", "TRIAGEDATE", "ASSESSDATE", "LEFTERDT", "DISPDATE", "CREATE_DATE_TIME", "UPDATE_DATE_TIME")
+nacrs_core <- nacrs_core %>% mutate(across(all_of(date_cols), as_datetime))
+```
+
+
+### ID variables
+
+(These get interpreted as numeric columns, but would be more useful as factors)
+```{r id-convert}
+id_cols <- c("FILEYEAR", "BATPD", "EDVISIT", "HOSPPROV", "HOSP", "HOSPFROM", "HOSPTO", "VISDISP", "HCN_e",
+             "PHN_e", "TRIAGELEVEL", "RFP", "COMPLAINT1", "COMPLAINT2", "COMPLAINT3", "RESPPHYS_e", 
+             "DOC_SPEC", "PROVNUM2_e")
+nacrs_core <- nacrs_core %>% mutate(across(all_of(id_cols), factor))
+```
+
+
+
+## Validity tests
+
+In this section, I import a set of rules for valid data (as written in `validate_rules.R`) and then test them in my loaded data. Any users building off of this code should edit this file to make it the set of rules that they're interested in testing in their data.
+
+For more information on how to structure these rules, look for documentation on the `validate` R package. Outside the HDPBC Desktop, this can be found at https://data-cleaning.github.io/validate/index.html. 
+
+```{r rules}
+rules_nacrs
+out <- confront(nacrs_core, rules_nacrs)
+summary(out)
+
+violating(nacrs_core, confront(nacrs_core, rules_nacrs["wait_time_recorded"])) %>% 
+  head() %>%
+  select(FILEYEAR, BATPD, EDVISIT, HOSPPROV, HOSP, HOSPFROM, HOSPTO, VISDISP, REGDATE, TRIAGEDATE, ASSESSDATE, LEFTERDT, DISPDATE, WAITPIA, ERTIME, TTODHRS, LOSHRS)
+```
+
+
+
+## Missingness
+
+```{r missingness, fig.width=10, fig.height=9}
+nacrs_core %>% 
+  missing_summary() %>%
+  print(n = ncol(nacrs_core))
+
+profiling_bar_plot(df = nacrs_core, facet = TRUE, type = "missing")
+```
+
+
+
+## Uniqueness
+
+```{r uniqueness, fig.width=10, fig.height=9}
+nacrs_core %>% 
+  unique_summary() %>%
+  print(n = ncol(nacrs_core))
+
+profiling_bar_plot(df = nacrs_core, facet = TRUE, type = "unique")
+```
+
+
+
+## Frequencies
+
+### Categorical
+
+These functions pull out the most common and most rare values for each categorical variables. 
+
+*Note:* For larger tables, these functions take an especially long time to run. Let's limit it to a random subset of 1 million rows.
+```{r most-common-and-rare}
+set.seed(57)
+row_ind <- sample(c(1:nrow(nacrs_core)), 1000000, replace = F)
+
+get_most_common(nacrs_core[row_ind, ]) %>%
+  print(n = Inf)
+
+get_most_rare(nacrs_core[row_ind, ]) %>%
+  print(n = Inf)
+```
+
+
+For categorical variables of interest, display the frequency of values as a bar graph.
+```{r category-bar}
+interesting_categories <- c("FILEYEAR", "EDVISIT", "HOSP", "SHIFT", "TRIAGELEVEL", "COMPLAINT1", "EDDIAG1")
+nacrs_core %>%
+  select(all_of(interesting_categories)) %>%
+  plot_bar_category(top = 10, each = TRUE, typographic = TRUE) # change EACH to FALSE if you want all plots together
+```
+
+
+### Dates
+
+Bar diagram for distribution of date fields:
+```{r date-bar}
+date_cols <- c("REGDATE", "TRIAGEDATE", "ASSESSDATE", "LEFTERDT", "DISPDATE", "CREATE_DATE_TIME", "UPDATE_DATE_TIME")
+plot_bar_date(df = nacrs_core, date_vars = date_cols)
+```
+
+
+### Numeric integer
+
+Histogram for distribution of integers:
+```{r integer-histo}
+nacrs_core %>% 
+  select(where(is.integer)) %>%
+  plot_hist_numeric(title = NULL) # can add each = TRUE if you want a separate plot for each variable
+```
+
+
+### Numeric continuous
+
+Histogram for distribution of continuous variables:
+```{r continuous-histo}
+nacrs_core %>% 
+  select(-where(is.POSIXt)) %>% # remove date fields (which are considered double class)
+  select(where(is.double)) %>%
+  plot_hist_numeric(title = NULL) # can add each = TRUE if you want a separate plot for each variable
+```
+
+When there are a few outliers that stretch the plot out, this density plot function provides a way of limiting the data plotted (with `limit`, where the value reflects what quantile of the data to go up to). 
+
+Note that there will be warnings about data being removed from the plot; this is the number of rows not included in the plot because of `limit`.
+```{r continuous-density}
+num_cols <- nacrs_core %>% 
+  select(-where(is.POSIXt)) %>%  # remove date fields (which are considered double class)
+  select(where(is.double)) %>%
+  names()
+plot_cont_density(df = nacrs_core, num_vars = num_cols, limit = 0.90)
+```
+
+
+
+## Min, max, med, sd, etc.
+
+### Summary tables
+
+`diagnose_numeric()` provides the overall data summary, including number of zeroes, negative values, and outliers:
+```{r summary-numeric}
+nacrs_core %>% 
+  diagnose_numeric() %>%
+  mutate(across(where(is.double), round, 3))
+```
+
+
+`describe()` gives more insight into the spread of data:
+```{r describe-1}
+nacrs_core %>% 
+  describe() %>%
+  select(-starts_with("p"))
+```
+
+
+Percentile values are also provided by `describe()`:
+```{r describe-2}
+nacrs_core %>% 
+  describe() %>%
+  select(c("variable", starts_with("p")))
+```
+
+
+
+### Box plots
+
+```{r box-plots, fig.width=10, fig.height=8}
+plot_box_numeric(nacrs_core, title = NULL)
+```
+
+
+
+## Outliers
+
+diagnose_outlier() identifies outlier values in numeric data. Outliers are based on the boxplot.stats() definition: values lying beyond the extremes of boxplot whiskers, which by default is set to 1.5*IQR from the box.
+```{r diagnose-outlier}
+nacrs_core %>%
+  diagnose_outlier() %>%
+  filter(outliers_cnt > 0) %>%
+  arrange(desc(outliers_cnt))
+```
+
+
+From this, we can make a simple plot of how many outliers there are per variable.
+```{r plot-num-outliers}
+profiling_bar_plot(nacrs_core, facet = FALSE, type = "outlier")
+```
+
+
+The dlookr package also offers really great plots that show the distribution of a variable of interest both with and without outliers. Even if you aren’t interested in removing outliers from the data, the “Without Outliers” plots produced here are still useful to show the spread of the majority of the data (since this can get compressed when plotting with all of the data if there are a few extreme values).
+
+Let’s look at it with the three variables with the highest outlier count:
+
+```{r plot-distribution-outliers}
+nacrs_core %>%
+  plot_outlier(diagnose_outlier(nacrs_core) %>%
+                 arrange(desc(outliers_cnt)) %>%
+                 head(3) %>%
+                 pull(variables))
+```
+
+
+
+## Hierarchy checks
+
+Instead of NACRS, I'm going to use the 811 dataset for this section, since it offers a straightforward example of two categorical variables with a hierarchical relationship: `TRIAGE_PROBLEM_CTGY` is a parent of `TRIAGE_PROBLEM`.
+
+First, load in the 811 data:
+```{r load-811}
+eoo <- load_full_table(data_holding = "HLTHLINK_811_PreA", table_name = "S811_HLTHLNK_COVID")
+```
+
+
+Then, check the hierarchical relationship:
+```{r hierarchy-check}
+get_hierarchy_summary_table(df = eoo, value_var = "TRIAGE_PROBLEM", cat_var = "TRIAGE_PROBLEM_CTGY")
+```
+
+
+Pull the child values with >1 parent:
+```{r get-multicat}
+get_multicategory_values(df = eoo, value_var = "TRIAGE_PROBLEM", cat_var = "TRIAGE_PROBLEM_CTGY", as_vector = FALSE)
+```
+
